@@ -1107,6 +1107,15 @@ class PPULifter:
         # Firmware-import stub: replace the whole body with an HLE dispatch.
         nid = self.hle_stub_nids.get(start)
         if nid is not None:
+            # The caller may restore r2 from its linkage area after the call.
+            # Replacing the import trampoline must retain its actual TOC save,
+            # especially for multi-TOC executables where a constant restore is
+            # not possible. Do not invent a save for stubs that lack one.
+            for insn in self._range_insns(instructions, start, end):
+                ops = _parse_operands(insn.operands)
+                if (insn.mnemonic == "std" and len(ops) == 2
+                        and ops[0] == "r2" and _disp_base(ops[1])[1] == "1"):
+                    func.body_lines.append("    " + self._translate(insn, func))
             func.body_lines.append(
                 f"    ps3_hle_call(0x{nid:08X}u, ctx); return;  /* import stub */")
             self.functions.append(func)
