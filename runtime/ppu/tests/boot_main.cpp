@@ -70,6 +70,7 @@ void     ps3_load_prx_modules(void) {}
 #include <string.h>
 #include <stdlib.h>
 #include <signal.h>
+#include "boot_vm_posix.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -296,6 +297,11 @@ extern "C" int  rsx_metal_backend_pump_messages(void);
 #  define rsx_backend_init    rsx_metal_backend_init
 #  define rsx_backend_present rsx_metal_backend_present
 #  define rsx_backend_pump    rsx_metal_backend_pump_messages
+#elif defined(PS3RECOMP_RSX_VULKAN)
+#  include "rsx_vulkan_backend.h"
+#  define rsx_backend_init    rsx_vulkan_backend_init
+#  define rsx_backend_present rsx_vulkan_backend_present
+#  define rsx_backend_pump    rsx_vulkan_backend_pump_messages
 #else
 extern "C" int  rsx_null_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_null_backend_present(void);
@@ -1128,7 +1134,7 @@ int main(int argc, char** argv)
      * range, everything) -- which native-VA mapping can't on Windows, because
      * the OS reserves the low 64 KB and DLLs occupy parts of the mid range.
      * On real PS3 those addresses are RAM, and the game writes to them (its
-     * null-object inits land on page 0); calloc backs them so the game runs.
+     * null-object inits land on page 0); the flat mapping backs them.
      * HLE functions that take guest pointers must translate via vm_base /
      * vm_write* (which also byte-swap) -- a raw *guest_ptr would deref the host
      * buffer's offset incorrectly. */
@@ -1139,8 +1145,8 @@ int main(int argc, char** argv)
     vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
     ppu_vm_size = 0;   /* full 32-bit space backed -> OOB guard unnecessary */
 #else
-    vm_base = (uint8_t*)calloc(1, 0xE0000000u);
-    ppu_vm_size = 0xE0000000u;
+    vm_base = boot_map_flat_vm(VM_SIZE);
+    ppu_vm_size = 0;   /* full 32-bit space plus top-edge guard */
 #endif
     if (!vm_base) { printf("vm alloc failed\n"); return 1; }
 
