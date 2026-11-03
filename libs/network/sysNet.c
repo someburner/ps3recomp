@@ -38,6 +38,7 @@
     #include <poll.h>
     #include <time.h>
     #include <sys/time.h>
+    #include <sys/ioctl.h>
     typedef int host_socket_t;
     typedef struct pollfd host_pollfd;
     #define HOST_INVALID_SOCKET (-1)
@@ -1031,6 +1032,63 @@ uint32_t sys_net_errno_loc(void)
 #define RET_S(v) (ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)(v))
 #define RET_U(v) (ctx->gpr[3] = (uint64_t)(uint32_t)(v))
 
+/* sys_net_sockinfo_t is nine big-endian words. LBP polls word 8 for
+ * SYS_NET_STATE_ESTABLISHED (7) before its local host/client handshake.
+ * Returning success without filling the record leaves that wait unresolved.
+ * Layout/state values: RPCS3 Emu/Cell/lv2/sys_net.h, sys_net_sockinfo_t.
+ * This handles a specific socket; enumeration (s == -1) is not implemented. */
+static int32_t net_get_sockinfo(int32_t s, uint32_t out, int32_t n)
+{
+    if (!valid_socket(s)) return fail(SYS_NET_EBADF);
+    if (n < 0) return fail(SYS_NET_EINVAL);
+    if (!n) return 0;
+    if (!out) return fail(SYS_NET_EFAULT);
+    struct sockaddr_in local = {0}, peer = {0};
+    socklen_t len = sizeof(local);
+    host_socket_t fd = s_sockets[s].host_fd;
+    if (getsockname(fd, (struct sockaddr*)&local, &len) == HOST_SOCKET_ERROR)
+        return host_fail();
+    len = sizeof(peer);
+    int connected = getpeername(fd, (struct sockaddr*)&peer, &len) == 0;
+    if (!connected) memset(&peer, 0, sizeof(peer));
+    uint32_t state = connected ? 7 : s_sockets[s].listening ? 4 :
+                     local.sin_port ? 3 : 2;
+#ifdef __linux__
+    if (s_sockets[s].stream) {
+        struct tcp_info info = {0};
+        len = sizeof(info);
+        if (getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &len) == 0) {
+            /* Linux TCP states -> PS3 states, including half-closed peers. */
+            static const uint8_t states[] = {0,7,5,6,8,9,13,1,10,12,4,11};
+            if (info.tcpi_state < sizeof(states) && info.tcpi_state != TCP_CLOSE)
+                state = states[info.tcpi_state];
+        }
+    }
+#endif
+    uint32_t received = 0, queued = 0;
+#ifdef _WIN32
+    u_long available = 0;
+    if (ioctlsocket(fd, FIONREAD, &available) == 0) received = (uint32_t)available;
+#else
+    int available = 0;
+    if (ioctl(fd, FIONREAD, &available) == 0 && available > 0) received = (uint32_t)available;
+#ifdef TIOCOUTQ
+    available = 0;
+    if (ioctl(fd, TIOCOUTQ, &available) == 0 && available > 0) queued = (uint32_t)available;
+#endif
+#endif
+    vm_write32(out, (uint32_t)s);
+    vm_write32(out + 4, s_sockets[s].stream ? IPPROTO_TCP : IPPROTO_UDP);
+    vm_write32(out + 8, received);
+    vm_write32(out + 12, queued);
+    vm_write32(out + 16, ntohl(local.sin_addr.s_addr));
+    vm_write32(out + 20, ntohs(local.sin_port));
+    vm_write32(out + 24, ntohl(peer.sin_addr.s_addr));
+    vm_write32(out + 28, ntohs(peer.sin_port));
+    vm_write32(out + 32, state);
+    return 1;
+}
+static void h_sockinfo(ppu_context* ctx)    { RET_S(net_get_sockinfo(S32(3), R32(4), S32(5))); }
 static void h_socket(ppu_context* ctx)      { RET_S(sys_net_bnet_socket(S32(3), S32(4), S32(5))); }
 static void h_close(ppu_context* ctx)       { RET_S(sys_net_bnet_close(S32(3))); }
 static void h_bind(ppu_context* ctx)        { RET_S(sys_net_bnet_bind(S32(3), PTR(4), R32(5))); }
@@ -1070,6 +1128,7 @@ void ps3_net_host_register(unsigned int (*guest_alloc)(unsigned int size, unsign
         { "recvfrom", h_recvfrom },       { "setsockopt", h_setsockopt },
         { "getsockopt", h_getsockopt },   { "getsockname", h_getsockname },
         { "getpeername", h_getpeername }, { "socketpoll", h_poll },
+        { "sys_net_get_sockinfo", h_sockinfo },
         { "socketselect", h_select },     { "inet_aton", h_inet_aton },
         { "inet_addr", h_inet_addr },     { "inet_ntoa", h_inet_ntoa },
         { "inet_pton", h_inet_pton },

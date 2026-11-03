@@ -153,6 +153,14 @@ int main(void)
 
     /* TCP: listen, connect, accept, select for readability, round-trip. */
     int32_t l = C3("socket", SYS_NET_AF_INET, SYS_NET_SOCK_STREAM, 0);
+    assert(ps3_compute_nid("sys_net_get_sockinfo") == 0x3B27C780u);
+    memset(vm_base + BUF, 0xA5, 40);
+    assert(C3("sys_net_get_sockinfo", l, BUF, 1) == 1);
+    assert(vm_read32(BUF) == (uint32_t)l && vm_read32(BUF + 32) == 2);
+    assert(vm_read32(BUF + 36) == 0xA5A5A5A5u);
+    assert(C3("sys_net_get_sockinfo", l, BUF, 0) == 0);
+    assert(C3("sys_net_get_sockinfo", l, 0, 1) < 0 && errno_cell() == SYS_NET_EFAULT);
+    assert(C3("sys_net_get_sockinfo", -1, BUF, 1) < 0 && errno_cell() == SYS_NET_EBADF);
     put_sockaddr(ADDR_A, LOOP, 0);
     assert(C3("bind", l, ADDR_A, 16) == 0);
     assert(C3("listen", l, 4, 0) == 0);
@@ -161,6 +169,12 @@ int main(void)
     assert(C3("connect", c, ADDR_A, 16) == 0);
     int32_t srv = C3("accept", l, ADDR_B, LEN);
     assert(srv > 0 && vm_read32(ADDR_B + 4) == LOOP);
+    assert(C3("sys_net_get_sockinfo", l, BUF, 1) == 1 && vm_read32(BUF + 32) == 4);
+    assert(C3("sys_net_get_sockinfo", c, BUF, 1) == 1);
+    assert(vm_read32(BUF + 4) == IPPROTO_TCP && vm_read32(BUF + 32) == 7);
+    assert(vm_read32(BUF + 16) == LOOP && vm_read32(BUF + 24) == LOOP);
+    assert(vm_read32(BUF + 28) == vm_read16(ADDR_A + 2));
+    assert(C3("sys_net_get_sockinfo", srv, BUF, 1) == 1 && vm_read32(BUF + 32) == 7);
 
     memcpy(vm_base + BUF, "ping", 4);
     assert(call("send", c, BUF, 4, 0, 0, 0) == 4);
@@ -170,6 +184,8 @@ int main(void)
     vm_write64(TV + 8, 0);
     assert(C5("socketselect", srv + 1, RSET, 0, 0, TV) == 1);
     assert(vm_read32(RSET + (uint32_t)srv / 32 * 4) & (1u << (srv % 32)));
+    assert(C3("sys_net_get_sockinfo", srv, BUF + 64, 1) == 1);
+    assert(vm_read32(BUF + 64 + 8) == 4); /* real receive queue, without consuming it */
     memset(vm_base + BUF, 0, 16);
     assert(call("recv", srv, BUF, 16, 0, 0, 0) == 4);
     assert(memcmp(vm_base + BUF, "ping", 4) == 0);
@@ -357,7 +373,13 @@ int main(void)
     /* A bad fd is EBADF (9), and closing works. */
     assert((uint32_t)C1("socketclose", 99) == 0x80010209u && errno_cell() == SYS_NET_EBADF);
     assert(C1("socketclose", a) == 0 && C1("socketclose", b) == 0);
-    assert(C1("socketclose", c) == 0 && C1("socketclose", srv) == 0 && C1("socketclose", l) == 0);
+    assert(C1("socketclose", c) == 0);
+    assert(C3("sys_net_get_sockinfo", c, BUF, 1) < 0 && errno_cell() == SYS_NET_EBADF);
+    assert(call("recv", srv, BUF, 16, 0, 0, 0) == 0); /* peer FIN */
+#ifdef __linux__
+    assert(C3("sys_net_get_sockinfo", srv, BUF, 1) == 1 && vm_read32(BUF + 32) == 10);
+#endif
+    assert(C1("socketclose", srv) == 0 && C1("socketclose", l) == 0);
 
     printf("test_sys_net: all passed\n");
     return 0;
