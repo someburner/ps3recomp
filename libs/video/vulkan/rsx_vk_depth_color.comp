@@ -1,0 +1,42 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) buffer Pixels { uint data[]; };
+layout(push_constant) uniform Params { uint count; uint bits; } p;
+
+// Exact round(d * (2^bits - 1)), matching the CPU's double quantization.
+// Two 32-bit words avoid requiring shaderInt64 or shaderFloat64.
+uint quantize(uint raw) {
+    float d = uintBitsToFloat(raw);
+    if (!(d > 0.0)) return 0;
+    if (d >= 1.0) return (1u << p.bits) - 1u;
+    uint e = (raw >> 23) & 255u;
+    uint shift = 150u - max(e, 1u);
+    if (shift >= 64u) return 0;
+    uint m = (raw & 0x7fffffu) | (e != 0u ? 0x800000u : 0u);
+    uint hi, lo;
+    umulExtended(m, (1u << p.bits) - 1u, hi, lo);
+    if (shift <= 32u) {
+        uint old = lo;
+        lo += 1u << (shift - 1u);
+        hi += uint(lo < old);
+        return shift == 32u ? hi : (lo >> shift) | (hi << (32u-shift));
+    }
+    hi += 1u << (shift - 33u);
+    return hi >> (shift - 32u);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (p.bits == 24u) {
+        if (i >= p.count) return;
+        uint v = quantize(data[i]);
+        // Z24S8's big-endian bytes decoded as A8R8G8B8 -> RGBA.
+        data[p.count+i] = ((v >> 8) & 255u) | ((v & 255u) << 8) | ((v >> 16) << 24);
+    } else {
+        uint first = i * 2u;
+        if (first >= p.count) return;
+        uint v = quantize(data[first]);
+        if (first+1u < p.count) v |= quantize(data[first+1u]) << 16;
+        data[p.count+i] = v;
+    }
+}

@@ -3379,6 +3379,19 @@ static void eng_present(u32 buffer_id)
     g.last_present_surface = target;
     g.be->present(g.be->user, g.surfaces[target].handle);
     g.frames++;
+    if (getenv("PS3RECOMP_FRAME_TIMING")) {
+        static double start;
+        static u32 first_frame;
+        struct timespec ts;
+        timespec_get(&ts, TIME_UTC);
+        double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+        if (!start) { start = now; first_frame = g.frames; }
+        else if (now - start >= 5.0) {
+            fprintf(stderr, "[rsx timing] frame=%u presents_per_second=%.3f interval=%.3f\n",
+                    g.frames, (g.frames-first_frame)/(now-start), now-start);
+            start = now; first_frame = g.frames;
+        }
+    }
     g.last_guest_draws = g.guest_draws;
     g.guest_draws = 0;
 }

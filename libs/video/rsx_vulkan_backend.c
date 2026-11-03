@@ -92,13 +92,13 @@
     X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) \
     X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkResetDescriptorPool) \
     X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
-    X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) \
+    X(vkCreateGraphicsPipelines) X(vkCreateComputePipelines) X(vkDestroyPipeline) \
     X(vkCreateSampler) X(vkDestroySampler) \
     X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) \
     X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyImage) \
     X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdBindPipeline) \
     X(vkCmdBindVertexBuffers) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) \
-    X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) \
+    X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) X(vkCmdDispatch) \
     X(vkCmdSetStencilReference) X(vkCmdSetDepthBounds) \
     X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) \
     X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCmdBlitImage)
@@ -2294,12 +2294,14 @@ static void vk_eng_release(void* user, u32 handle)
 }
 
 static void vk_eng_snapshot_pool_drain(void);
+static void vk_depth_color_shutdown(void);
 
 static void vk_eng_shutdown(void* user)
 {
     vk_eng2_shutdown(user);
     for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++) vk_eng_release(user, i);
     vk_eng_snapshot_pool_drain();
+    vk_depth_color_shutdown();
     vk_eb_release();
     vk_destroy_buffer(&s_rb_stage);
     vk_destroy_buffer(&s_up_stage);
@@ -2639,7 +2641,7 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
             break;
         }
     if (!reused && vk_create_image(&o->im, t->fmt, t->w, t->h,
-                                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                    VK_IMAGE_ASPECT_COLOR_BIT)) {
         vk_destroy_image(&o->im);
         memset(o, 0, sizeof *o);
@@ -2752,6 +2754,8 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
     }
     return rc ? 0 : snap;
 }
+#include "vulkan/rsx_vk_depth_color.inc"
+
 /* The depth aspect of a D32_SFLOAT target copies out as 32-bit floats, which
  * is what the engine asks for; other depth formats report failure. */
 static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32 h,
@@ -3763,6 +3767,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
     .depth_target_create  = vk_eng_depth_target_create,
     .depth_target_release = vk_eng_release,
     .depth_snapshot       = vk_eng_depth_snapshot,
+    .depth_as_color       = vk_eng_depth_as_color,
     .color_snapshot       = vk_eng_color_snapshot,
     .pipeline_create      = vk_eng_pipeline_create,
     .pipeline_release     = vk_eng_pipeline_release,
