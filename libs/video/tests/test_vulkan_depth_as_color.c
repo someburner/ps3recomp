@@ -50,7 +50,7 @@ static void check(unsigned w, unsigned h)
         if(pending && getenv("PS3RECOMP_VK_DEFER_VIEWS") && !strcmp(getenv("PS3RECOMP_VK_DEFER_VIEWS"),"1"))
             assert(s_retired_view_count && s_eb_pending);
         if(getenv("PS3RECOMP_VK_DEPTH_DIRECT") && !strcmp(getenv("PS3RECOMP_VK_DEPTH_DIRECT"),"1"))
-            assert(s_dd.pipeline && (s_eobj[handles[0]].im.usage & VK_IMAGE_USAGE_STORAGE_BIT));
+            assert(s_dd.pipeline && (s_eobj[handles[0]].im.usage & (s_dd.raster?VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT:VK_IMAGE_USAGE_STORAGE_BIT)));
         for (unsigned mode=0; mode<3; ++mode) {
             assert(handles[mode]);
             unsigned bpp=mode==2?2:4, scale=mode==2?65535:16777215;
@@ -82,6 +82,24 @@ int main(void)
     setenv("PS3RECOMP_VK_WINDOW","0",1);
     assert(!rsx_vulkan_backend_init(64,64,"depth conversion regression"));
     check(3,5); check(257,129); check(128,64); check(1280,720); check(3,5);
+    if(s_dd.raster) {
+        /* Keep enough snapshots alive to force framebuffer-cache eviction
+         * with queued GPU work, then verify every image before releasing it. */
+        unsigned z=vk_eng_depth_target_create(NULL,3,5), handles[70];
+        assert(z);
+        for(unsigned i=0;i<70;i++) {
+            handles[i]=vk_eng_depth_as_color(NULL,z,3,5,RSX_TEX_FMT_A8R8G8B8);
+            assert(handles[i]);
+        }
+        for(unsigned i=0;i<70;i++) {
+            unsigned char pixels[60];
+            vk_eng_readback(NULL,handles[i],0,0,3,5,pixels,12);
+            for(unsigned p=0;p<15;p++)
+                assert(pixels[p*4]==255 && pixels[p*4+1]==255 && pixels[p*4+2]==0 && pixels[p*4+3]==255);
+            vk_eng_release(NULL,handles[i]);
+        }
+        vk_eng_release(NULL,z);
+    }
     rsx_vulkan_backend_shutdown();
     printf("PASS: %u GPU depth conversions match CPU quantization\n",checks);
     return 0;

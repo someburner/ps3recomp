@@ -474,6 +474,7 @@ static void vk_present_wait_gpu(void);
  * all earlier work has completed. */
 static u32 s_eb_pending;
 static void vk_eng_flush(void);
+static void vk_depth_raster_forget(VkImageView view);
 static int vk_eb_active(void);       /* batching decided on and on */
 static u32 vk_eb_max(void);
 static void vk_eb_recorded(void);   /* one more command in the open batch */
@@ -496,6 +497,7 @@ static void vk_destroy_image(vk_image* im)
     if (s_eb_pending) vk_eng_flush();
     /* Never under a present's copy that may still read it. */
     if (im->img) vk_present_wait_gpu();
+    if (im->view) vk_depth_raster_forget(im->view);
     if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
     if (im->img)  pvkDestroyImage(s_vk.device, im->img, NULL);
     if (im->mem)  pvkFreeMemory(s_vk.device, im->mem, NULL);
@@ -613,6 +615,13 @@ static void vk_cmd_after_everything(VkCommandBuffer cb)
                            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+
+static int vk_compact_barriers(void)
+{
+    static int on=-1;
+    if(on<0) { const char* e=getenv("PS3RECOMP_VK_COMPACT_BARRIERS"); on=e && !strcmp(e,"1"); }
+    return on;
 }
 
 static int vk_begin_at(const char* caller)
@@ -3788,8 +3797,12 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
     }
     /* Everything submitted before is complete (each submission is waited
      * on); this orders memory for the surfaces this draw touches. */
-    for (u32 i = 0; i < n; i++)
-        vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+    /* The batched path just issued an ALL_COMMANDS global memory barrier.
+     * GENERAL -> GENERAL image barriers add no layout transition or memory
+     * dependency beyond it. Keep them when there was no global barrier. */
+    if (!batched || !vk_compact_barriers())
+        for (u32 i = 0; i < n; i++)
+            vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
     VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                                   .renderPass = rp, .framebuffer = fb,
                                   .renderArea = { { 0, 0 }, { w, h } } };
