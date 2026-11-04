@@ -31,6 +31,12 @@ static uint32_t rnd_float(void)
 
 int main(void)
 {
+#if defined(__AVX2__) && defined(__FMA__) && defined(SPU_X86_FAST_FLOAT)
+    g_spu_float_rn_scope = (_mm_getcsr() & 0xE040u) == 0;
+    if (getenv("SPU_FLOAT_RZ") && !strcmp(getenv("SPU_FLOAT_RZ"),"1")) {
+        _mm_setcsr(0xFFC0u); g_spu_float_rn_scope=2;
+    }
+#endif
 #if !defined(__ARM_NEON) && !(defined(__AVX2__) && !defined(SPU_SCALAR_HELPERS))
     puts("test_spu_float_neon: no NEON or AVX2, nothing to compare");
     return 0;

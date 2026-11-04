@@ -242,8 +242,9 @@ void spu_stop(spu_context* ctx)
  * on entry to spu_run_with_halt and the caller's FPCR is put back on the way out: a run can
  * happen synchronously on a PPU thread (a workload dispatched from the PPU caller), whose
  * lifted floating point must keep round to nearest with denormals. Double precision restores
- * the default around itself inside a run. arm64 only; elsewhere the exact forms always run.
- * Returns the FPCR to restore, or ~0 when nothing was changed. */
+ * the default around itself inside a run. Supported on arm64 and opt-in AVX2/FMA
+ * x86 builds. Returns the host mode/scope token to restore; arm64 uses ~0 when
+ * nothing was changed. */
 static uint64_t spu_float_mode_enter(void)
 {
 #if defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
@@ -260,6 +261,19 @@ static uint64_t spu_float_mode_enter(void)
     if (v == SPU_FPCR_RZFZ) return ~0ull;   /* nested run: the outer one restores */
     __asm__ volatile("msr fpcr, %0" :: "r"((uint64_t)SPU_FPCR_RZFZ));
     return v;
+#elif defined(__AVX2__) && defined(__FMA__) && defined(SPU_X86_FAST_FLOAT) && !defined(SPU_X86_DOUBLE_FLOAT) && !defined(SPU_SCALAR_HELPERS)
+    const int previous = g_spu_float_rn_scope;
+    const unsigned csr = _mm_getcsr();
+    static int s_x86_rz = -1;
+    int rz = __atomic_load_n(&s_x86_rz, __ATOMIC_RELAXED);
+    if (rz < 0) {
+        const char* e = getenv("SPU_FLOAT_RZ");
+        rz = e && !strcmp(e, "1");
+        __atomic_store_n(&s_x86_rz, rz, __ATOMIC_RELAXED);
+    }
+    if (rz) { _mm_setcsr(0xFFC0u); g_spu_float_rn_scope = 2; }
+    else g_spu_float_rn_scope = (csr & 0xE040u) == 0;
+    return ((uint64_t)(unsigned)previous << 32) | csr;
 #else
     return ~0ull;
 #endif
@@ -268,6 +282,9 @@ static void spu_float_mode_leave(uint64_t outer)
 {
 #if defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
     if (outer != ~0ull) __asm__ volatile("msr fpcr, %0" :: "r"(outer));
+#elif defined(__AVX2__) && defined(__FMA__) && defined(SPU_X86_FAST_FLOAT) && !defined(SPU_X86_DOUBLE_FLOAT) && !defined(SPU_SCALAR_HELPERS)
+    _mm_setcsr((unsigned)outer);
+    g_spu_float_rn_scope = (int)(outer >> 32);
 #else
     (void)outer;
 #endif

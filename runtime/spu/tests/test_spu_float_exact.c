@@ -172,6 +172,16 @@ static int all_passes(long scale, const char* mode)
 #if defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
 static uint64_t fpcr_get(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }
 static void fpcr_set(uint64_t v) { __asm__ volatile("msr fpcr, %0" :: "r"(v)); }
+#elif defined(__AVX2__) && defined(__FMA__) && defined(SPU_X86_FAST_FLOAT)
+#define SPU_FPCR_RZFZ 0xFFC0u
+static uint64_t fpcr_get(void) { return _mm_getcsr() & ~0x3Fu; }
+static void fpcr_set(uint64_t v) {
+    _mm_setcsr(v ? (unsigned)v : 0x1F80u);
+    g_spu_float_rn_scope = v ? 2 : 1;
+}
+#endif
+#if (defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)) || \
+    (defined(__AVX2__) && defined(__FMA__) && defined(SPU_X86_FAST_FLOAT))
 /* SPU_FLOAT_RZ: double precision and frds must give the default-FPCR answer on a thread whose
  * FPCR is round toward zero with flush-to-zero; FPCR must be back afterwards. */
 static long dp_under_rz(long n)
@@ -205,9 +215,13 @@ static long dp_under_rz(long n)
 
 int main(int argc, char** argv)
 {
+#if defined(__AVX2__) && defined(__FMA__) && defined(SPU_X86_FAST_FLOAT)
+    g_spu_float_rn_scope = (_mm_getcsr() & 0xE040u) == 0;
+#endif
     const long scale = argc > 1 ? atol(argv[1]) : 1;
     int rc = all_passes(scale, "default (round to nearest)");
-#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
+#if (defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)) || \
+    (defined(__AVX2__) && defined(__FMA__) && defined(SPU_X86_FAST_FLOAT))
     /* SPU_FLOAT_RZ: the same passes on a thread running round toward zero with flush-to-zero,
      * where spu_fa.. take their native form. */
     fpcr_set(SPU_FPCR_RZFZ);

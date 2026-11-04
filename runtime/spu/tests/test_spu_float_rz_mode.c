@@ -2,7 +2,7 @@
  * flush-to-zero and puts the caller's FPCR back on the way out -- after a normal return, after a
  * halt (longjmp), and around a nested run. A run can happen synchronously on a PPU thread, whose
  * floating point must keep round to nearest with denormals. Without SPU_FLOAT_RZ=1 FPCR is never
- * touched. arm64 only. */
+ * touched on arm64; the opt-in x86 path also restores the caller's MXCSR. */
 #include "../spu_helpers.h"
 #include "../spu_interp.h"
 #include <assert.h>
@@ -65,8 +65,49 @@ int main(void)
     printf("PASS: SPU_FLOAT_RZ=%d FPCR inside runs and restored after return, halt and nesting\n", rz);
     return 0;
 }
+#elif defined(__AVX2__) && defined(__FMA__) && defined(SPU_X86_FAST_FLOAT) && !defined(SPU_X86_DOUBLE_FLOAT) && !defined(SPU_SCALAR_HELPERS)
+static spu_context ctx, inner_ctx;
+static int seen_inner, seen_outer_after;
+static int x86_rz;
+static void leaf_return(spu_context* c) {
+    (void)c;
+    seen_inner = g_spu_float_rn_scope;
+    assert(seen_inner == (x86_rz ? 2 : ((_mm_getcsr() & 0xE040u) == 0)));
+    if(x86_rz) assert((_mm_getcsr() & 0xE040u) == 0xE040u);
+    u128 a=spu_splat_u32(0x3F800001), b=spu_splat_u32(0x3EAAAAAB);
+    u128 got=spu_fa(a,b), ref=spu_fa_ref(a,b);
+    assert(!memcmp(&got,&ref,16));
+}
+static void leaf_halt(spu_context* c) { leaf_return(c); spu_halt(c); }
+static void outer_nested(spu_context* c) {
+    (void)c;
+    spu_context_init(&inner_ctx,0);
+    spu_run_with_halt(leaf_halt,&inner_ctx);
+    seen_outer_after=g_spu_float_rn_scope;
+}
+int main(void) {
+    x86_rz=getenv("SPU_FLOAT_RZ") && !strcmp(getenv("SPU_FLOAT_RZ"),"1");
+    const unsigned original=_mm_getcsr();
+    const unsigned modes[]={0x1F80,0x3F80,0x5F80,0x7F80,0x9FC0};
+    void (*entries[])(spu_context*)={leaf_return,leaf_halt,outer_nested};
+    for(unsigned m=0;m<sizeof modes/sizeof *modes;m++)
+        for(unsigned e=0;e<sizeof entries/sizeof *entries;e++) {
+            _mm_setcsr(modes[m]);
+            g_spu_float_rn_scope=0;
+            seen_inner=seen_outer_after=-1;
+            spu_context_init(&ctx,0);
+            spu_run_with_halt(entries[e],&ctx);
+            assert(g_spu_float_rn_scope==0);
+            assert((_mm_getcsr() & 0xE040u)==(modes[m] & 0xE040u));
+            assert(seen_inner==(x86_rz ? 2 : ((modes[m] & 0xE040u)==0)));
+            if(e==2) assert(seen_outer_after==seen_inner);
+        }
+    _mm_setcsr(original);
+    puts("PASS: x86 SPU float scope preserves MXCSR controls and restores scope after return, halt and nesting");
+    return 0;
+}
 #else
-int main(void) { puts("SKIP: SPU_FLOAT_RZ is arm64 only"); return 0; }
+int main(void) { puts("SKIP: no enabled SPU floating-point scope"); return 0; }
 #endif
 
 /* Link-only boundaries outside this CPU-only fixture. Fail if any is reached. */
