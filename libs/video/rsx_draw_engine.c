@@ -127,6 +127,7 @@ typedef struct {
     u32 conv;              /* depth_as_color of the depth at conv_serial, or 0 */
     u32 conv_w, conv_h, conv_fmt;
     u64 conv_serial;
+    u32 profile_scissor[4]; /* optional diagnostic: last depth-writing draw */
     u32 last_use;          /* g.frames when last bound or sampled             */
     u32 ext_w, ext_h;      /* the largest clip it was bound with: past it,
                             * nothing was drawn or cleared (eng_clear_rect) */
@@ -1060,6 +1061,13 @@ static u32 eng_zdepth_snapshot(u32 slot, u32 tex_w, u32 tex_h)
  * convert it itself (eng_zdepth_as_color). */
 static int s_depth_via_guest;
 
+static int eng_depth_region_profile(void)
+{
+    static int on=-1;
+    if(on<0) on=getenv("PS3RECOMP_DEPTH_REGION_PROFILE")!=NULL;
+    return on;
+}
+
 /* A Z24S8 depth target read as a linear A8R8G8B8 texture of its own pitch:
  * a deferred renderer rebuilding depth from the bytes. Storing it into guest
  * memory for that (eng_zdepth_to_guest) waits for the GPU, converts on the CPU
@@ -1094,6 +1102,20 @@ static u32 eng_zdepth_as_color(u32 slot, const rsx_dsp_texture* t)
         return 0;
     if (!z->conv || z->conv_serial != z->depth_serial || z->conv_fmt != base_fmt ||
         z->conv_w != t->width || z->conv_h != t->height) {
+        if(eng_depth_region_profile()) {
+            static u64 full_pixels, last_draw_pixels, conversions, resized;
+            u32 x=z->profile_scissor[0],y=z->profile_scissor[1];
+            u32 right=x+z->profile_scissor[2],bottom=y+z->profile_scissor[3];
+            if(right>t->width) right=t->width;
+            if(bottom>t->height) bottom=t->height;
+            full_pixels+=(u64)t->width*t->height;
+            last_draw_pixels+=(u64)(right>x?right-x:0)*(bottom>y?bottom-y:0);
+            resized+=z->conv && (z->conv_w!=t->width || z->conv_h!=t->height || z->conv_fmt!=base_fmt);
+            if((++conversions%2000)==0)
+                fprintf(stderr,"[depth-region] conversions=%llu last_draw_area=%.2f%% resized=%llu frame=%u\n",
+                    (unsigned long long)conversions,full_pixels?100.0*last_draw_pixels/full_pixels:0.0,
+                    (unsigned long long)resized,g.frames);
+        }
         const u32 tex = g.be->depth_as_color(g.be->user, z->handle, t->width, t->height,
                                              base_fmt);
         if (!tex) return 0;
@@ -1571,6 +1593,10 @@ static void eng_zdepth_wrote(u32 slot, const rsx_dsp_surface* sf)
     z->pitch = sf->zeta_pitch;
     z->used_w = sf->clip_w ? sf->clip_w : g.width;
     z->used_h = sf->clip_h ? sf->clip_h : g.height;
+    if(eng_depth_region_profile()) {
+        z->profile_scissor[0]=z->profile_scissor[1]=0;
+        z->profile_scissor[2]=z->w; z->profile_scissor[3]=z->h;
+    }
 }
 
 static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
@@ -1586,6 +1612,7 @@ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
  * Preserve write ordering/guest ownership metadata, but carry forward a
  * current immutable conversion when its source depth cannot have changed.
  * In particular, never make an already-stale conversion current again. */
+static void eng_scissor_rect(const rsx_dsp_surface* sf,u32 w,u32 h,u32 out[4]);
 static void eng_zdepth_wrote_draw(u32 slot,const rsx_dsp_surface* sf,u32 compare)
 {
     static int on=-1;
@@ -1594,6 +1621,7 @@ static void eng_zdepth_wrote_draw(u32 slot,const rsx_dsp_surface* sf,u32 compare
     int keep=on && (compare==0x0200u || compare==0x0202u) &&
              z->conv && z->conv_serial==z->depth_serial;
     eng_zdepth_wrote(slot,sf);
+    if(eng_depth_region_profile()) eng_scissor_rect(sf,z->w,z->h,z->profile_scissor);
     if(keep) {
         z->conv_serial=z->depth_serial;
         static u32 retained;
