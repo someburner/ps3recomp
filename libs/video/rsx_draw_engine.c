@@ -1582,6 +1582,26 @@ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
     }
 }
 
+/* EQUAL can only write the depth already stored; NEVER cannot write at all.
+ * Preserve write ordering/guest ownership metadata, but carry forward a
+ * current immutable conversion when its source depth cannot have changed.
+ * In particular, never make an already-stale conversion current again. */
+static void eng_zdepth_wrote_draw(u32 slot,const rsx_dsp_surface* sf,u32 compare)
+{
+    static int on=-1;
+    if(on<0) { const char* e=getenv("PS3RECOMP_DEPTH_EQUAL_CACHE"); on=e && !strcmp(e,"1"); }
+    eng_zdepth* z=&g.zdepths[slot];
+    int keep=on && (compare==0x0200u || compare==0x0202u) &&
+             z->conv && z->conv_serial==z->depth_serial;
+    eng_zdepth_wrote(slot,sf);
+    if(keep) {
+        z->conv_serial=z->depth_serial;
+        static u32 retained;
+        if((++retained & 4095u)==1u)
+            fprintf(stderr,"[rsx engine] unchanged-depth conversion reused count=%u frame=%u\n",retained,g.frames);
+    }
+}
+
 /* SET_TEXTURE_FILTER's min field is [18:16] (1 NEAREST, 2 LINEAR, then 3..6,
  * the four combinations of a nearest/linear minification with a
  * nearest/linear mip filter) and mag [26:24]; SET_TEXTURE_CONTROL0 carries
@@ -3235,7 +3255,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
     if (rs.color_mask) eng_surfaces_wrote(targets, n_targets);
     if (zslot != ENG_INVALID && rs.depth_test && rs.depth_write) {
         g.zdepths[zslot].had_write = 1;
-        eng_zdepth_wrote(zslot, &sf);
+        eng_zdepth_wrote_draw(zslot, &sf, rs.depth_func);
     }
 }
 
