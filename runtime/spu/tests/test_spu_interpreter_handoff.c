@@ -16,6 +16,7 @@ extern void spu_register_function(uint32_t, void (*)(spu_context*));
 extern int spu_run_with_halt(void (*)(spu_context*), spu_context*);
 extern void spu_halt(spu_context*);
 static spu_context ctx;
+static uint32_t stub_pc = 0x4000;
 static void word(uint32_t pc, uint32_t w) {
     ctx.ls[pc] = w >> 24; ctx.ls[pc+1] = w >> 16;
     ctx.ls[pc+2] = w >> 8; ctx.ls[pc+3] = w;
@@ -36,13 +37,13 @@ static void wrong_continuation(spu_context* c) {
     finish(c);
 }
 static void tail_entry(spu_context* c) {
-    c->pc = 0x4000; g_spu_trampoline_fn = spu_indirect_branch;
+    c->pc = stub_pc; g_spu_trampoline_fn = spu_indirect_branch;
 }
 static int queued_call;
 static void nested_entry(spu_context* c) {
     c->gpr[0] = spu_link(0x204);
     c->host_depth++;
-    c->pc = 0x4000;
+    c->pc = stub_pc;
     if (queued_call) g_spu_trampoline_fn = spu_indirect_branch;
     else spu_indirect_branch(c);
     spu_drain_call(c, 0x204);
@@ -53,9 +54,11 @@ static void nested_entry(spu_context* c) {
 int main(int argc, char** argv) {
     assert(argc == 2);
     const char* mode = argv[1];
+    int high = !strncmp(mode, "high-", 5);
+    if (high) { mode += 5; stub_pc = 0x24000; setenv("SPU_INTERP_UNLIFTED", "1", 1); }
     spu_context_init(&ctx, 0);
     ctx.image_id = 77;
-    ctx.policy_mode = 1; /* live policy APIs are below the unlifted job */
+    ctx.policy_mode = !high; /* live policy APIs are below the unlifted job */
     ctx.status = SPU_STATUS_RUNNING;
     spu_begin_image(77);
     spu_register_function(0x200, helper);
@@ -68,34 +71,34 @@ int main(int argc, char** argv) {
         spu_begin_image(0);
         spu_register_function(0x4004, finish); /* wildcard ignored by pure interpretation */
     }
-    word(0x4000, 0x04000082); /* ori $2,$1,0: force full interpreter */
+    word(stub_pc + 0x00, 0x04000082); /* ori $2,$1,0: force full interpreter */
     void (*entry)(spu_context*) = tail_entry;
     if (!strcmp(mode, "top-zero")) {
-        word(0x4004, 0x30000000); /* bra 0: registered, valid lifted entry */
+        word(stub_pc + 0x04, 0x30000000); /* bra 0: registered, valid lifted entry */
     } else if (!strcmp(mode, "top")) {
-        word(0x4004, 0x30004800); /* bra 0x240 */
+        word(stub_pc + 0x04, 0x30004800); /* bra 0x240 */
     } else if (!strncmp(mode, "nested-return", 13)) {
         entry = nested_entry; queued_call = 1;
         word(0x204, 0x1C004A95); /* ai $21,$21,1: must NOT be interpreted */
         word(0x208, 0x30004800); /* bra 0x240 */
-        word(0x4004, 0x35000000); /* bi $0 -> 0x204 */
+        word(stub_pc + 0x04, 0x35000000); /* bi $0 -> 0x204 */
     } else if (!strcmp(mode, "nested-calls")) {
         entry = nested_entry;
-        word(0x4004, 0x31004000); /* brasl $0,0x200 */
-        word(0x4008, 0x04000082); /* ori $2,$1,0 */
-        word(0x400C, 0x31004000); /* brasl $0,0x200 */
-        word(0x4010, 0x04000082); /* ori $2,$1,0 */
-        word(0x4014, 0x30004800); /* bra 0x240 */
+        word(stub_pc + 0x04, 0x31004000); /* brasl $0,0x200 */
+        word(stub_pc + 0x08, 0x04000082); /* ori $2,$1,0 */
+        word(stub_pc + 0x0C, 0x31004000); /* brasl $0,0x200 */
+        word(stub_pc + 0x10, 0x04000082); /* ori $2,$1,0 */
+        word(stub_pc + 0x14, 0x30004800); /* bra 0x240 */
     } else if (!strcmp(mode, "stop-zero") || !strcmp(mode, "nested-stop")) {
         if (!strcmp(mode, "nested-stop")) entry = nested_entry;
-        word(0x4004, 0x00000000); /* stop 0 */
+        word(stub_pc + 0x04, 0x00000000); /* stop 0 */
     } else if (!strcmp(mode, "stop-code")) {
-        word(0x4004, 0x00002123); /* stop 0x2123 */
+        word(stub_pc + 0x04, 0x00002123); /* stop 0x2123 */
     } else if (!strcmp(mode, "halt")) {
-        word(0x4004, 0x7F000102); /* heqi $2,0: ori copied initial zero */
+        word(stub_pc + 0x04, 0x7F000102); /* heqi $2,0: ori copied initial zero */
     } else if (!strcmp(mode, "smc")) {
-        word(0x4000, 0x40812003); /* il $3,0x240 (microstep supported) */
-        word(0x4004, 0x35000180); /* bi $3 */
+        word(stub_pc + 0x00, 0x40812003); /* il $3,0x240 (microstep supported) */
+        word(stub_pc + 0x04, 0x35000180); /* bi $3 */
     } else if (!strncmp(mode, "smc-ldst", 8)) {
         /* A generated save/restore stub's shape: quadword stores and loads,
          * then a branch. "smc-ldst" runs it on the microstep's load/store fast
@@ -107,25 +110,25 @@ int main(int argc, char** argv) {
             ctx.gpr[6]._u32[k] = 0xA0B0C0D0u ^ (uint32_t)k;
         }
         ctx.gpr[1]._u32[0] = 0x3000;
-        word(0x4000, 0x40812003); /* il   $3,0x240 */
-        word(0x4004, 0x20FE0005); /* stqa $5,0x3F000 */
-        word(0x4008, 0x24008086); /* stqd $6,0x20($1) */
-        word(0x400C, 0x30FE0007); /* lqa  $7,0x3F000 */
-        word(0x4010, 0x34008088); /* lqd  $8,0x20($1) */
-        word(0x4014, 0x35000180); /* bi   $3 */
+        word(stub_pc + 0x00, 0x40812003); /* il   $3,0x240 */
+        word(stub_pc + 0x04, 0x20FE0005); /* stqa $5,0x3F000 */
+        word(stub_pc + 0x08, 0x24008086); /* stqd $6,0x20($1) */
+        word(stub_pc + 0x0C, 0x30FE0007); /* lqa  $7,0x3F000 */
+        word(stub_pc + 0x10, 0x34008088); /* lqd  $8,0x20($1) */
+        word(stub_pc + 0x14, 0x35000180); /* bi   $3 */
     } else if (!strcmp(mode, "stepcap") || !strcmp(mode, "negative-stepcap")) {
-        word(0x4004, 0x04000082);
-        word(0x4008, 0x30004800);
+        word(stub_pc + 0x04, 0x04000082);
+        word(stub_pc + 0x08, 0x30004800);
     } else if (!strcmp(mode, "pure-interpreter")) {
-        word(0x4004, 0x30004800);
-        uint32_t pc = spu_interp_run_until(&ctx, 0x4000, 0);
+        word(stub_pc + 0x04, 0x30004800);
+        uint32_t pc = spu_interp_run_until(&ctx, stub_pc, 0);
         assert(pc == 0x240 && ctx.status == SPU_STATUS_RUNNING);
         assert(g_spu_trampoline_fn == NULL); /* adapter owns scheduling */
         puts("pure-interpreter PASS"); return 0;
     } else { fprintf(stderr, "unknown mode\n"); return 2; }
     int halted = spu_run_with_halt(entry, &ctx);
     printf("%s: halted=%d status=%X pc=%X helper=%u finish=%u host-cont=%u wrong-cont=%u\n",
-           mode, halted, ctx.status, ctx.pc, ctx.gpr[10]._u32[0],
+           argv[1], halted, ctx.status, ctx.pc, ctx.gpr[10]._u32[0],
            ctx.gpr[11]._u32[0], ctx.gpr[20]._u32[0], ctx.gpr[21]._u32[0]);
     fflush(stdout);
     if (!strcmp(mode, "stepcap") || !strcmp(mode, "negative-stepcap")) {
@@ -135,6 +138,13 @@ int main(int argc, char** argv) {
         puts("PASS"); return 0;
     }
     assert(ctx.gpr[21]._u32[0] == 0);
+    if (high && (!strncmp(mode, "stop", 4) || !strcmp(mode, "halt"))) {
+        assert(halted == 0 && ctx.gpr[11]._u32[0] == 0);
+        assert(g_spu_trampoline_fn == NULL);
+        assert(ctx.status == (!strcmp(mode, "halt") ? SPU_STATUS_STOPPED_BY_HALT : SPU_STATUS_STOPPED_BY_STOP));
+        assert(ctx.stop_code == (!strcmp(mode, "halt") ? 0x1000u : !strcmp(mode, "stop-code") ? 0x2123u : 0u));
+        puts("PASS (high-LS stop does not schedule a continuation)"); return 0;
+    }
     if (!strncmp(mode, "smc-ldst", 8)) {
         for (int k = 0; k < 4; k++) {
             const uint32_t v5 = ctx.gpr[5]._u32[k], v6 = ctx.gpr[6]._u32[k];

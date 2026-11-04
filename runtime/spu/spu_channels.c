@@ -2914,7 +2914,17 @@ void spu_indirect_branch(spu_context* ctx)
               if (PS3_LOG_FIRST(_n, 8))
                   fprintf(stderr, "[spu] img=%d interpreting unlifted LS 0x%05X "
                           "(runtime-loaded code)\n", ctx->image_id, p);
-              spu_interp_run(ctx, p);
+              const uint32_t return_pc = ctx->drain_ret_pc;
+              spu_interp_run_until(ctx, p, return_pc);
+              /* A live rejoin must schedule its compiled continuation, just
+               * like the SMC interpreter adapter. Otherwise the outer driver
+               * sees an empty trampoline and ends a still-running task. A
+               * nested drain owns its return boundary and must resume its
+               * existing host frame instead of executing that entry twice. */
+              if (ctx->image_id >= 0 && (ctx->status & SPU_STATUS_RUNNING) &&
+                  (!return_pc || (ctx->pc & SPU_LS_MASK) != return_pc) &&
+                  spu_lifted_lookup(ctx, ctx->pc))
+                  g_spu_trampoline_fn = spu_indirect_branch;
               return;
           } }
         spu_halt(ctx);
