@@ -189,6 +189,9 @@ static int audio_backend_init(void)
         return -1;
     }
 
+    printf("[cellAudio] SDL output driver=%s rate=%d samples=%u\n",
+           SDL_GetCurrentAudioDriver(),have.freq,(unsigned)have.samples);
+
     SDL_PauseAudioDevice(s_sdl_audio_dev, 0); /* Start playback */
     return 0;
 }
@@ -203,7 +206,7 @@ static void audio_backend_shutdown(void)
 
 static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
 {
-    if (s_sdl_audio_dev) {
+    if (s_sdl_audio_dev && SDL_GetAudioDeviceStatus(s_sdl_audio_dev)==SDL_AUDIO_PLAYING) {
         SDL_QueueAudio(s_sdl_audio_dev, stereo_samples,
                        num_samples * 2 * sizeof(float));
     }
@@ -212,7 +215,7 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
 /* SDL queues without bound: keep about four blocks ahead of the device. */
 static int audio_backend_room(void)
 {
-    if (!s_sdl_audio_dev) return -1;
+    if (!s_sdl_audio_dev || SDL_GetAudioDeviceStatus(s_sdl_audio_dev)!=SDL_AUDIO_PLAYING) return -1;
     return SDL_GetQueuedAudioSize(s_sdl_audio_dev) / (2 * sizeof(float)) <
            CELL_AUDIO_BLOCK_SAMPLES * 4 ? CELL_AUDIO_BLOCK_SAMPLES : 0;
 }
@@ -652,19 +655,60 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
 static void* audio_mix_thread_func(void* arg)
 {
     (void)arg;
+    ps3_thread_name("audio mix");
     printf("[cellAudio] Mixing thread started\n");
-
+    const char* pacing_env=getenv("PS3_AUDIO_PACING");
+    const int paced=!(pacing_env && !strcmp(pacing_env,"0"));
+    const int report=getenv("AUDIO_RATE")!=NULL;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC,&ts);
+    uint64_t anchor=(uint64_t)ts.tv_sec*1000000000ULL+ts.tv_nsec;
+    uint64_t blocks=0, report_start=anchor, report_blocks=0, silent=0;
+    u32 max_queued=0;
     while (s_mix_thread_running) {
+        if(paced) {
+            /* QueueAudio has no maximum queue length. Backpressure must be
+             * checked BEFORE consuming another guest block or notifying its
+             * producer. A fixed 5ms sleep consumes 256 samples faster than
+             * their 5.333ms duration and accumulates latency without bound. */
+            const int room=audio_backend_room();
+            if(room>=0 && room<CELL_AUDIO_BLOCK_SAMPLES) {
+                audio_backend_wait();
+                continue;
+            }
+            if(room<0) {
+                clock_gettime(CLOCK_MONOTONIC,&ts);
+                uint64_t now=(uint64_t)ts.tv_sec*1000000000ULL+ts.tv_nsec;
+                uint64_t frames=blocks*CELL_AUDIO_BLOCK_SAMPLES;
+                uint64_t offset=(frames/CELL_AUDIO_SAMPLE_RATE)*1000000000ULL+
+                    (frames%CELL_AUDIO_SAMPLE_RATE)*1000000000ULL/CELL_AUDIO_SAMPLE_RATE;
+                uint64_t due=anchor+offset;
+                if(now<due) { usleep(1000); continue; }
+                /* Device unavailable/debugger pause: discard old deadlines
+                 * instead of consuming the guest ring in a catch-up burst. */
+                if(now-due>50000000ULL) anchor=now-offset;
+            }
+        }
         audio_mix_one_block();
         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
         audio_notify_event_queues();
-
+        blocks++;
         u32 queued = audio_backend_queued_samples();
-        if (queued > CELL_AUDIO_BLOCK_SAMPLES * 4) {
-            usleep(5000);
-        } else {
-            usleep(2000);
+        if(report) {
+            int nonzero=0;
+            for(u32 i=0;i<CELL_AUDIO_BLOCK_SAMPLES*2;i++) if(s_mix_buffer[i]!=0.0f) { nonzero=1; break; }
+            silent+=!nonzero;
+            if(queued>max_queued) max_queued=queued;
+            clock_gettime(CLOCK_MONOTONIC,&ts);
+            uint64_t now=(uint64_t)ts.tv_sec*1000000000ULL+ts.tv_nsec;
+            if(now-report_start>=5000000000ULL) {
+                uint64_t n=blocks-report_blocks;
+                fprintf(stderr,"[audio-rate] paced=%d %.2f blocks/s (nominal 187.5), silent %.1f%% queued=%u max_queued=%u frames\n",
+                    paced,n*1e9/(now-report_start),n?100.0*silent/n:0.0,queued,max_queued);
+                report_start=now; report_blocks=blocks; silent=0; max_queued=0;
+            }
         }
+        if(!paced) usleep(queued>CELL_AUDIO_BLOCK_SAMPLES*4?5000:2000);
     }
 
     printf("[cellAudio] Mixing thread stopped\n");
