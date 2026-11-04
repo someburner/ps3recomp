@@ -243,6 +243,10 @@ static void decode_texel(const rsx_tex_layout* tl, const u8* s, u8* d,
         return;
     }
 
+    case 0x8B: /* G8B8 is one big-endian 16-bit word, not two host bytes. */
+        d[0] = s[1]; d[1] = s[0];
+        return;
+
     case 0x90: {              /* DEPTH24_D8: depth in the top 24 bits */
         const float f = (float)(be32(s) >> 8) / 16777215.0f;
         memcpy(d, &f, sizeof f);
@@ -288,11 +292,21 @@ void rsx_texture_decode(void* dst, u32 dst_pitch,
     const u32 l2w = rsx_log2_ceil(w), l2h = rsx_log2_ceil(h);
     const u32 sbpp = tl->bytes_per_texel, dbpp = tl->dst_bytes_per_texel;
 
-    /* R8 and R8G8 reach the host byte for byte. A linear one is then a
-     * straight row copy, which is worth keeping as a separate path: it is the
-     * common case (Bink video planes, the G8B8 font atlas) and by far the
-     * faster one. G8B8's channel placement is the sampler's component remap,
-     * not this. */
+    /* G8B8's crossbar expects the low byte in host R and high byte in G.
+     * Its word byte order is separate from the component remap. Keep a
+     * contiguous row loop for the frequently updated linear font atlas. */
+    if (tl->base_format == 0x8Bu && !tl->swizzled) {
+        for (u32 y = 0; y < h; y++) {
+            const u8* srow = src + (size_t)y * tl->row_bytes;
+            u8* drow = d + (size_t)y * dst_pitch;
+            for (u32 x = 0; x < w; x++) {
+                drow[x * 2u] = srow[x * 2u + 1u];
+                drow[x * 2u + 1u] = srow[x * 2u];
+            }
+        }
+        return;
+    }
+    /* The remaining byte-channel formats need only row copies. */
     if ((tl->fmt == RSX_TEXFMT_R8 || tl->fmt == RSX_TEXFMT_R8G8) && !tl->swizzled) {
         for (u32 y = 0; y < h; y++)
             memcpy(d + (size_t)y * dst_pitch,

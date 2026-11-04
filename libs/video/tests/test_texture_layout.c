@@ -542,7 +542,36 @@ static void test_decode_swizzled(void)
     CHECK(differs);
 }
 
-/* Two-byte texels deswizzle as a unit: both bytes move together. */
+/* A big-endian G8B8 word must become host B,G. Check padded source and
+ * destination rows and the final default crossbar, not only raw storage. */
+static void test_decode_g8b8_linear(void)
+{
+    rsx_tex_layout L;
+    rsx_texture_layout_pitched(FMT_G8B8 | FMT_LN, 2, 2, 8, &L);
+    const u8 src[16] = {0x12,0xA3,0x45,0xB6,0xEE,0xEE,0xEE,0xEE,
+                       0x78,0xC9,0xAB,0xDC,0xEE,0xEE,0xEE,0xEE};
+    const u8 expected[8] = {0xA3,0x12,0xB6,0x45,0xC9,0x78,0xDC,0xAB};
+    u8 dst[12], remap[4];
+    memset(dst, 0xCC, sizeof dst);
+    rsx_texture_decode(dst, 6, src, 2, 2, &L, 0);
+    rsx_texture_component_remap(0xAAE4, FMT_G8B8, remap);
+    for (u32 y = 0; y < 2; y++) {
+        for (u32 x = 0; x < 2; x++) {
+            const u8* pixel = dst + y * 6 + x * 2;
+            CHECK_EQ(pixel[0], expected[y * 4 + x * 2]);
+            CHECK_EQ(pixel[1], expected[y * 4 + x * 2 + 1]);
+            /* The identity ARGB crossbar presents G,B,G,B. */
+            CHECK_EQ(pixel[remap[0]], src[y * 8 + x * 2]);
+            CHECK_EQ(pixel[remap[1]], src[y * 8 + x * 2 + 1]);
+            CHECK_EQ(pixel[remap[2]], src[y * 8 + x * 2]);
+            CHECK_EQ(pixel[remap[3]], src[y * 8 + x * 2 + 1]);
+        }
+        CHECK_EQ(dst[y * 6 + 4], 0xCC);
+        CHECK_EQ(dst[y * 6 + 5], 0xCC);
+    }
+}
+
+/* Two-byte texels deswizzle as a unit, then swap out of big-endian. */
 static void test_decode_g8b8_swizzled(void)
 {
     rsx_tex_layout L;
@@ -562,8 +591,8 @@ static void test_decode_g8b8_swizzled(void)
     rsx_texture_decode(dst, 16, src, 4, 4, &L, 0);
     for (u32 y = 0; y < 4; y++)
         for (u32 x = 0; x < 4; x++) {
-            CHECK_EQ(dst[y * 16 + x * 2 + 0], 0x10 + y * 4 + x);
-            CHECK_EQ(dst[y * 16 + x * 2 + 1], 0x80 + y * 4 + x);
+            CHECK_EQ(dst[y * 16 + x * 2 + 0], 0x80 + y * 4 + x);
+            CHECK_EQ(dst[y * 16 + x * 2 + 1], 0x10 + y * 4 + x);
         }
 }
 
@@ -591,7 +620,7 @@ static void test_decode_swizzled_sizes(void)
             rsx_texture_decode(dst, w * 2, src, w, h, &L, 0);
             u32 bad = 0;
             for (u32 i = 0; i < w * h; i++)
-                if (dst[i * 2] != (u8)(i >> 8) || dst[i * 2 + 1] != (u8)i) bad++;
+                if (dst[i * 2] != (u8)i || dst[i * 2 + 1] != (u8)(i >> 8)) bad++;
             if (bad) printf("  %ux%u: %u texels misplaced\n", w, h, bad);
             CHECK_EQ(bad, 0);
         }
@@ -860,6 +889,7 @@ int main(void)
     test_decode_argb_linear();
     test_decode_linear_argb_matches_texel_path();
     test_decode_swizzled();
+    test_decode_g8b8_linear();
     test_decode_g8b8_swizzled();
     test_decode_swizzled_sizes();
     test_decode_compressed_is_verbatim();
