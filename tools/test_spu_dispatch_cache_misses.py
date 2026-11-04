@@ -13,9 +13,9 @@ with tempfile.TemporaryDirectory(prefix='spu-negative-cache-') as tmp:
         str(spu/'tests/test_spu_lifted_start.c'),*[str(spu/s) for s in sources],
         str(root/'runtime/syscalls/spu_fallback.c'),str(root/'runtime/syscalls/sdk_version_weak.c'),
         str(root/'runtime/platform/win32_compat.c'),'-pthread','-lm','-o',str(exe)],check=True)
-    for mode in ('0','1','shadow'):
-        env=dict(os.environ,SPU_DISPATCH_CACHE=mode,SPU_DISPATCH_CACHE_MISSES='1',SPU_INTERP_DECODE_CACHE='1')
+    for mode,bitmap in (('0','0'),('1','0'),('1','1'),('shadow','1')):
+        env=dict(os.environ,SPU_DISPATCH_CACHE=mode,SPU_DISPATCH_CACHE_MISSES='1',SPU_INTERP_DECODE_CACHE='1',SPU_DISPATCH_ENTRY_BITMAP=bitmap)
         result=subprocess.run([str(exe)],cwd=tmp,env=env,capture_output=True,text=True,timeout=60)
-        print('mode',mode,result.stdout.splitlines()[-1] if result.stdout else 'no output',flush=True)
+        print('mode',mode,'bitmap',bitmap,result.stdout.splitlines()[-1] if result.stdout else 'no output',flush=True)
         if result.returncode or 'shadow mismatch' in result.stderr:
             print(result.stdout);print(result.stderr);raise SystemExit(1)

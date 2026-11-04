@@ -21,7 +21,7 @@ static void* run(void* arg) {
         uint32_t pc=(i*4u)&0x3fffcu;
         compare(rng,pc); compare(rng,pc);             /* miss then hit */
         compare(rng^0x8000u,pc);                    /* changed live word */
-        compare(rng,pc^0x1000u); compare(rng,pc);   /* cache collision */
+        compare(rng,pc^0x4000u); compare(rng,pc);   /* cache collision */
     }
     return 0;
 }

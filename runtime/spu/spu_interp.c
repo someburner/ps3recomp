@@ -102,7 +102,7 @@ static void spu_decode1(uint32_t insn, uint32_t pc, spu_ins* d) {
  * The per-thread cache shares neither entries nor mutable state with other
  * SPUs. Disabled unless explicitly requested for measured A/B trials. */
 typedef struct { uint32_t pc_key, word; spu_ins decoded; } spu_decode_entry;
-static SPU_THREAD_LOCAL spu_decode_entry t_decode_cache[1024];
+static SPU_THREAD_LOCAL spu_decode_entry t_decode_cache[4096];
 static SPU_THREAD_LOCAL int t_decode_mode = -1;
 static inline void spu_decode_cached(uint32_t word,uint32_t pc,spu_ins* out)
 {
@@ -111,7 +111,7 @@ static inline void spu_decode_cached(uint32_t word,uint32_t pc,spu_ins* out)
         t_decode_mode=e && !strcmp(e,"1");
     }
     if(!t_decode_mode) { spu_decode1(word,pc,out); return; }
-    spu_decode_entry* entry=&t_decode_cache[(pc>>2)&1023u];
+    spu_decode_entry* entry=&t_decode_cache[(pc>>2)&4095u];
     /* LS PCs are at most 18 bits; +1 reserves the zero-initialized tag. */
     if(entry->pc_key!=pc+1u || entry->word!=word) {
         spu_decode1(word,pc,&entry->decoded);
@@ -136,8 +136,16 @@ static inline void spu_decode_cached(uint32_t word,uint32_t pc,spu_ins* out)
 static int spu_step(spu_context* ctx) {
     uint32_t pc = ctx->pc, m = pc & SPU_LS_MASK;
     const uint8_t* p = ctx->ls;
-    uint32_t insn = ((uint32_t)p[m] << 24) | ((uint32_t)p[m+1] << 16)
-                  | ((uint32_t)p[m+2] << 8) | p[m+3];
+    uint32_t insn;
+#if defined(_MSC_VER) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    /* Fetch the live word in one load, including on cache hits. memcpy keeps
+     * this alias-safe; architectural instruction PCs are four-byte aligned. */
+    memcpy(&insn, p + m, sizeof(insn));
+    insn = SPU_BSWAP32(insn);
+#else
+    insn = ((uint32_t)p[m] << 24) | ((uint32_t)p[m+1] << 16)
+         | ((uint32_t)p[m+2] << 8) | p[m+3];
+#endif
     spu_ins d; spu_decode_cached(insn, pc, &d);
     uint32_t next = (pc + 4) & 0x3FFFC;
 

@@ -476,6 +476,32 @@ static void audio_mix_one_block(void)
         u32 block_offset = block_idx * CELL_AUDIO_BLOCK_SAMPLES * nch;
         float* src = port->buffer + block_offset;
 
+        /* Optional producer/consumer diagnostics; silence alone is not proof
+         * of an underrun, so report whether other ring slots hold data too. */
+        { static int enabled=-1;
+          static unsigned total[CELL_AUDIO_PORT_MAX], empty[CELL_AUDIO_PORT_MAX];
+          static unsigned other[CELL_AUDIO_PORT_MAX], run[CELL_AUDIO_PORT_MAX], longest[CELL_AUDIO_PORT_MAX];
+          if(enabled<0) enabled=getenv("AUDIO_RING_RATE")!=NULL;
+          if(enabled) {
+            int nz=0;
+            for(u32 i=0;i<CELL_AUDIO_BLOCK_SAMPLES*nch;i++) if(ld_be_f32(src+i)!=0.0f) {nz=1;break;}
+            total[p]++;
+            if(!nz) {
+                empty[p]++; run[p]++; if(run[p]>longest[p]) longest[p]=run[p];
+                int elsewhere=0;
+                for(u32 b=0;b<nblock && !elsewhere;b++) if(b!=block_idx)
+                    for(u32 i=0;i<CELL_AUDIO_BLOCK_SAMPLES*nch;i++)
+                        if(ld_be_f32(port->buffer+b*CELL_AUDIO_BLOCK_SAMPLES*nch+i)!=0.0f) {elsewhere=1;break;}
+                other[p]+=elsewhere;
+            } else run[p]=0;
+            if(total[p]>=938) {
+                fprintf(stderr,"[audio-ring-rate] port=%u channels=%u blocks=%u empty=%u other_ready=%u longest_empty=%u ridx=%llu\n",
+                    p,nch,total[p],empty[p],other[p],longest[p],(unsigned long long)port->read_index);
+                total[p]=empty[p]=other[p]=longest[p]=0;
+            }
+          }
+        }
+
         /* AUDIO_PEAK diag: which blocks of this port's WHOLE ring hold data,
          * vs which block the read cursor is on -- distinguishes "writer never
          * writes" from "writer and reader cycle out of phase". */
@@ -665,6 +691,9 @@ static void* audio_mix_thread_func(void* arg)
     uint64_t anchor=(uint64_t)ts.tv_sec*1000000000ULL+ts.tv_nsec;
     uint64_t blocks=0, report_start=anchor, report_blocks=0, silent=0;
     u32 max_queued=0;
+    uint64_t last_mix=0, max_gap=0, short_gaps=0, empty_device=0;
+    const char* wav_path=getenv("AUDIO_WAV");
+    FILE* wav=wav_path?fopen(wav_path,"wb"):NULL;
     while (s_mix_thread_running) {
         if(paced) {
             /* QueueAudio has no maximum queue length. Backpressure must be
@@ -689,7 +718,15 @@ static void* audio_mix_thread_func(void* arg)
                 if(now-due>50000000ULL) anchor=now-offset;
             }
         }
+        if(report) {
+            clock_gettime(CLOCK_MONOTONIC,&ts);
+            uint64_t now=(uint64_t)ts.tv_sec*1000000000ULL+ts.tv_nsec;
+            if(last_mix) { uint64_t gap=now-last_mix; if(gap>max_gap) max_gap=gap; short_gaps+=gap<1000000; }
+            last_mix=now;
+            if(blocks>64 && audio_backend_queued_samples()==0) empty_device++;
+        }
         audio_mix_one_block();
+        if(wav) fwrite(s_mix_buffer,sizeof(float),CELL_AUDIO_BLOCK_SAMPLES*2,wav);
         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
         audio_notify_event_queues();
         blocks++;
@@ -705,11 +742,16 @@ static void* audio_mix_thread_func(void* arg)
                 uint64_t n=blocks-report_blocks;
                 fprintf(stderr,"[audio-rate] paced=%d %.2f blocks/s (nominal 187.5), silent %.1f%% queued=%u max_queued=%u frames\n",
                     paced,n*1e9/(now-report_start),n?100.0*silent/n:0.0,queued,max_queued);
+                fprintf(stderr,"[audio-timing] max_gap_ms=%.3f sub_ms_gaps=%llu device_empty=%llu\n",
+                    max_gap/1e6,(unsigned long long)short_gaps,(unsigned long long)empty_device);
                 report_start=now; report_blocks=blocks; silent=0; max_queued=0;
+                max_gap=short_gaps=empty_device=0;
             }
         }
         if(!paced) usleep(queued>CELL_AUDIO_BLOCK_SAMPLES*4?5000:2000);
     }
+
+    if(wav) fclose(wav);
 
     printf("[cellAudio] Mixing thread stopped\n");
     return NULL;

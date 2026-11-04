@@ -1546,6 +1546,10 @@ typedef struct {
 #define SPU_FN_REGISTRY_MAX 262144
 static spu_reg_entry s_registry[SPU_FN_REGISTRY_MAX];
 static uint32_t s_registry_count = 0;
+/* Conservative union of registered instruction addresses across every image.
+ * A clear bit proves there is no compiled entry, regardless of overlay or
+ * context ownership. Set bits still use the complete ownership resolver. */
+static uint32_t s_registry_pc_bits[0x40000u / 128u];
 
 /* Accessor for the sampling profiler in ppu_loader.cpp. Its address->function
  * map is built from the PPU table alone, which leaves the SPU-lifted bodies as
@@ -1620,6 +1624,8 @@ void spu_register_function(uint32_t addr, spu_fn fn)
     else
         s_hash_next[s_hash_tail[h] - 1] = i + 1;
     s_hash_tail[h] = i + 1;
+    if (addr < 0x40000u)
+        __atomic_fetch_or(&s_registry_pc_bits[addr >> 7], 1u << ((addr >> 2) & 31), __ATOMIC_RELEASE);
     /* Published after the entry is linked: the dispatch cache keys its entries
      * by this count, so a lookup that sees the new count also finds the entry. */
     __atomic_store_n(&s_registry_count, i + 1, __ATOMIC_RELEASE);
@@ -1811,6 +1817,22 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
 {
     const int mode = spu_dcache_mode();
     if (!mode || !ctx) return spu_lifted_lookup_full(ctx, lsa);
+    const uint32_t rgen = __atomic_load_n(&s_registry_count, __ATOMIC_ACQUIRE);
+    static SPU_TLS int bitmap = -1;
+    if (bitmap < 0) {
+        const char* setting = getenv("SPU_DISPATCH_ENTRY_BITMAP");
+        bitmap = setting && !strcmp(setting, "1");
+    }
+    if (bitmap && lsa < 0x40000u &&
+        !(__atomic_load_n(&s_registry_pc_bits[lsa >> 7], __ATOMIC_ACQUIRE) & (1u << ((lsa >> 2) & 31)))) {
+        if (mode == 2) {
+            const spu_lifted_fn full = spu_lifted_lookup_full(ctx, lsa);
+            if (full && __atomic_fetch_add(&s_dcache_shadow_bad, 1, __ATOMIC_RELAXED) < 16)
+                fprintf(stderr, "[spu-dcache] bitmap shadow mismatch lsa=0x%05X full=%p\n", lsa, (void*)full);
+            return full;
+        }
+        return NULL;
+    }
     spu_context* c = (spu_context*)ctx;
     uint32_t id = c->dcache_id;
     if (!id) {
@@ -1819,7 +1841,6 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
     }
     /* Read before the resolver walks the registry: an entry is never keyed by
      * a count newer than the registry it saw. */
-    const uint32_t rgen = __atomic_load_n(&s_registry_count, __ATOMIC_ACQUIRE);
     spu_dcache_ent* e = &t_dcache[((lsa >> 2) ^ (id * 0x9E3779B1u)) & (SPU_DCACHE_ENTRIES - 1)];
     if (e->id == id && e->lsa == lsa && e->rgen == rgen &&
         e->residency == c->dcache_residency && e->image == c->image_id &&
