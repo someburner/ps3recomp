@@ -1020,7 +1020,7 @@ skip_inject: ;
        * re-running costs ~5 minutes a try; a sweep answers "can input move the
        * camera anywhere useful" in one run, and the frame dumps say which step
        * paid off. Steps: centre, each left-stick direction, then each right. */
-      { static int sw = -1; static clock_t t0 = 0;
+      { static int sw = -1;
         if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                       sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
         if (sw) {
@@ -1031,8 +1031,9 @@ skip_inject: ;
                 {128,128,128,  0}, {128,128,128,255},
                 {128,128,  0,128}, {128,128,255,128},
             };
-            if (!t0) t0 = clock();
-            long el = (long)((double)(clock() - t0) / (double)CLOCKS_PER_SEC);
+            /* Match PAD_SCRIPT/STICK's wall/flip clock. Process CPU time
+             * advances faster as more emulated threads become busy. */
+            long el = (long)pad_clock(s_t0);
             int k = (int)((el / (sw > 0 ? sw : 1)) % 9);
             hs->analog_lx = steps[k][0]; hs->analog_ly = steps[k][1];
             hs->analog_rx = steps[k][2]; hs->analog_ry = steps[k][3];

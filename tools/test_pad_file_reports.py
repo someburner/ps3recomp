@@ -15,7 +15,7 @@ b=subprocess.run(cmd,capture_output=True,text=True,timeout=30)
 assert not b.returncode,b.stdout+b.stderr
 env={k:v for k,v in os.environ.items() if not k.startswith(('PAD_','YDKJ_'))}
 ok=True
-for mode in ('drains','default','ports-clear','physical','pressure-sensor','always','other-inputs'):
+for mode in ('drains','default','ports-clear','physical','pressure-sensor','always','other-inputs','sweep-clock'):
     with tempfile.TemporaryDirectory(prefix='pad-reports-') as d:
         argv=[str(o/'fixture'),mode,str(pathlib.Path(d)/'pad.txt')]
         (o/(mode+'.argv.json')).write_text(json.dumps(argv)+'\n')

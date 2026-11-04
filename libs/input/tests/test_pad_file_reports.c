@@ -70,6 +70,7 @@ int main(int argc,char** argv)
     if(strcmp(mode,"other-inputs"))setenv("PAD_FILE",path,1);
     else{setenv("PAD_SCRIPT","0:0x0020",1);setenv("PAD_STICK","140,150,160,170",1);}
     if(!strcmp(mode,"always"))setenv("PAD_ALWAYS_CHANGE","1",1);
+    if(!strcmp(mode,"sweep-clock"))setenv("PAD_SWEEP","2",1);
     vm_base=mmap(NULL,0x10000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
     assert(vm_base!=MAP_FAILED);ppu_vm_size=0x10000;
     publish(path,"");s_pad_initialized=1;s_max_connect=7;
@@ -127,6 +128,19 @@ int main(int argc,char** argv)
         assert(word(CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X)==160);
         assert(word(CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y)==170);
         assert(read_pad(0)==0);
+    }else if(!strcmp(mode,"sweep-clock")){
+        const unsigned values[9][4]={{128,128,128,128},{128,0,128,128},{128,255,128,128},
+            {0,128,128,128},{255,128,128,128},{128,128,128,0},{128,128,128,255},
+            {128,128,0,128},{128,128,255,128}};
+        for(unsigned step=1;step<=9;step++) {
+            /* Advancing elapsed time, with essentially no process CPU time,
+             * must advance the real HLE's serialized stick positions. */
+            fake_ms=1000+step*2000;assert(read_pad(0)>0);
+            assert(word(CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X)==values[step%9][0]);
+            assert(word(CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y)==values[step%9][1]);
+            assert(word(CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X)==values[step%9][2]);
+            assert(word(CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y)==values[step%9][3]);
+        }
     }else assert(!"unknown case");
     puts("PASS actual cellPad HLE positive-report hold, guest serialization and preserved input semantics");
 }
