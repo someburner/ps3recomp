@@ -97,6 +97,8 @@ static u32 vk_eng_depth_direct(void* user,u32 depth,u32 w,u32 h)
     if(!on || vk_depth_direct_init()) return 0;
     vk_eng_obj* z=vk_eng_get(depth,VK_ENG_DEPTH);
     if(!z || !(z->im.usage & VK_IMAGE_USAGE_SAMPLED_BIT)) return 0;
+    static int readonly=-1;
+    if(readonly<0) { const char* e=getenv("PS3RECOMP_VK_DEPTH_READONLY"); readonly=e && !strcmp(e,"1"); }
     if(!s_dd.depth_view[depth]) {
         VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=z->im.img,
             .viewType=VK_IMAGE_VIEW_TYPE_2D,.format=z->fmt,.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1}};
@@ -132,16 +134,24 @@ static u32 vk_eng_depth_direct(void* user,u32 depth,u32 w,u32 h)
         .descriptorPool=s_dd.pool,.descriptorSetCount=1,.pSetLayouts=&s_dd.set_layout};
     if(pvkAllocateDescriptorSets(s_vk.device,&ai,&set)) { vk_eng_release(user,hd); return 0; }
     s_dd.sets++;
-    VkDescriptorImageInfo ii[2]={{s_vk.sampler,s_dd.depth_view[depth],VK_IMAGE_LAYOUT_GENERAL},
+    VkDescriptorImageInfo ii[2]={{s_vk.sampler,s_dd.depth_view[depth],readonly?VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_GENERAL},
                                {VK_NULL_HANDLE,o->im.view,VK_IMAGE_LAYOUT_GENERAL}};
     VkWriteDescriptorSet writes[2]={
         {.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=set,.dstBinding=0,.descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.pImageInfo=&ii[0]},
         {.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=set,.dstBinding=1,.descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,.pImageInfo=&ii[1]}};
     pvkUpdateDescriptorSets(s_vk.device,s_dd.raster?1:2,writes,0,NULL);
     vk_cmd_after_everything(s_vk.cmd);
-    /* The global barrier covers both images. Only a new output needs an
-     * actual layout transition; reused images already remain GENERAL. */
-    if(!vk_compact_barriers())
+    /* Optional read-only source layout lets the driver choose its sampled
+     * depth representation; restore GENERAL before subsequent attachment
+     * use. Otherwise the global barrier covers both existing GENERAL images. */
+    VkImageMemoryBarrier source={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT,.dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+        .oldLayout=VK_IMAGE_LAYOUT_GENERAL,.newLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+        .image=z->im.img,.subresourceRange={s_vk.depth_aspect,0,1,0,1}};
+    if(readonly)
+        pvkCmdPipelineBarrier(s_vk.cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,NULL,0,NULL,1,&source);
+    else if(!vk_compact_barriers())
         vk_barrier_image(z->im.img,s_vk.depth_aspect,VK_IMAGE_LAYOUT_GENERAL);
     if(!reused || !vk_compact_barriers())
         vk_barrier_image(o->im.img,VK_IMAGE_ASPECT_COLOR_BIT,reused?VK_IMAGE_LAYOUT_GENERAL:VK_IMAGE_LAYOUT_UNDEFINED);
@@ -152,6 +162,13 @@ static u32 vk_eng_depth_direct(void* user,u32 depth,u32 w,u32 h)
     pvkCmdBindDescriptorSets(s_vk.cmd,VK_PIPELINE_BIND_POINT_COMPUTE,s_dd.layout,0,1,&set,0,NULL);
     pvkCmdPushConstants(s_vk.cmd,s_dd.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof params,params);
     pvkCmdDispatch(s_vk.cmd,(w+s_dd.tile_x-1)/s_dd.tile_x,(h+s_dd.tile_y-1)/s_dd.tile_y,1);
+    }
+    if(readonly) {
+        source.srcAccessMask=VK_ACCESS_SHADER_READ_BIT;
+        source.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+        source.oldLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        source.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+        pvkCmdPipelineBarrier(s_vk.cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,NULL,0,NULL,1,&source);
     }
     vk_barrier_image(o->im.img,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_GENERAL);
     if(batch) { if(++s_eb_pending>=vk_eb_max()) vk_eng_flush(); }
