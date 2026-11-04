@@ -612,6 +612,26 @@ static void test_dispatch_cache(void)
     spu_overlay_note_get(c, 0x850000, c->ls + a + 0x800, 16);
     check(spu_lifted_lookup(c, a) == dc_primary, "dcache: equal residency count in a new lifetime is a miss");
 
+    /* Negative answers obey the same lifetime/owner/registration keys. */
+    const uint32_t b=a+0x400;
+    spu_context_init(d,1); d->image_id=131;
+    for(unsigned repeat=0;repeat<1000;repeat++)
+        check(spu_lifted_lookup(d,b)==NULL,"dcache: repeated unregistered target misses");
+    spu_begin_image(131); spu_register_function(b,dc_primary); spu_begin_image(0);
+    check(spu_lifted_lookup(d,b)==dc_primary,"dcache: registration invalidates negative answer");
+    spu_overlay_register_region(0x860000,0x100,132);
+    spu_overlay_note_get(d,0x860000,d->ls+b,16);
+    check(spu_lifted_lookup(d,b)==NULL,"dcache: authoritative owner hole hides primary");
+    check(spu_lifted_lookup(d,b)==NULL,"dcache: repeated owner hole remains unlifted");
+    spu_begin_image(132); spu_register_function(b,dc_region); spu_begin_image(0);
+    check(spu_lifted_lookup(d,b)==dc_region,"dcache: owner registration invalidates negative answer");
+    spu_overlay_note_get(d,0x870000,d->ls+b,16);
+    check(spu_lifted_lookup(d,b)==dc_primary,"dcache: owner invalidation restores primary after cached hole");
+    spu_context_init(d,1); d->image_id=133;
+    check(spu_lifted_lookup(d,b)==NULL,"dcache: reused context does not inherit a hit");
+    d->image_id=131;
+    check(spu_lifted_lookup(d,b)==dc_primary,"dcache: image change invalidates negative answer");
+
     if (!getenv("SPU_DISPATCH_CACHE")) {
         /* Only spu_overlay_note_get may change resident code; a direct write
          * that bypasses it keeps the cached answer, which shows the cache is

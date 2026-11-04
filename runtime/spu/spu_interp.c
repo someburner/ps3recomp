@@ -10,6 +10,7 @@
 #include "spu_helpers.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Channel ABI (runtime/spu/spu_channels.c); the lifter emits these same protos
  * into each generated spu_recomp.h — declared here to stay header-independent. */
@@ -95,6 +96,31 @@ static void spu_decode1(uint32_t insn, uint32_t pc, spu_ins* d) {
     d->op = SPU_word;
 }
 
+/* Decoding is a pure function of the instruction word and its LS address.
+ * Always fetch the current word before probing: DMA, self-modifying stores,
+ * image changes and context reuse therefore need no cache invalidation.
+ * The per-thread cache shares neither entries nor mutable state with other
+ * SPUs. Disabled unless explicitly requested for measured A/B trials. */
+typedef struct { uint32_t pc_key, word; spu_ins decoded; } spu_decode_entry;
+static SPU_THREAD_LOCAL spu_decode_entry t_decode_cache[1024];
+static SPU_THREAD_LOCAL int t_decode_mode = -1;
+static inline void spu_decode_cached(uint32_t word,uint32_t pc,spu_ins* out)
+{
+    if(t_decode_mode<0) {
+        const char* e=getenv("SPU_INTERP_DECODE_CACHE");
+        t_decode_mode=e && !strcmp(e,"1");
+    }
+    if(!t_decode_mode) { spu_decode1(word,pc,out); return; }
+    spu_decode_entry* entry=&t_decode_cache[(pc>>2)&1023u];
+    /* LS PCs are at most 18 bits; +1 reserves the zero-initialized tag. */
+    if(entry->pc_key!=pc+1u || entry->word!=word) {
+        spu_decode1(word,pc,&entry->decoded);
+        entry->word=word;
+        entry->pc_key=pc+1u;
+    }
+    *out=entry->decoded;
+}
+
 /* spu_lifted_lookup() is defined by spu_fn_registry.c (the single owner of the
  * lifted-function table + eviction). Declared in spu_interp.h. */
 
@@ -112,7 +138,7 @@ static int spu_step(spu_context* ctx) {
     const uint8_t* p = ctx->ls;
     uint32_t insn = ((uint32_t)p[m] << 24) | ((uint32_t)p[m+1] << 16)
                   | ((uint32_t)p[m+2] << 8) | p[m+3];
-    spu_ins d; spu_decode1(insn, pc, &d);
+    spu_ins d; spu_decode_cached(insn, pc, &d);
     uint32_t next = (pc + 4) & 0x3FFFC;
 
     switch (d.op) {

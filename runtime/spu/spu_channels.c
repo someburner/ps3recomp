@@ -1772,8 +1772,8 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
  *    same address starts with id 0 and takes a fresh one.
  * A verified slot is not re-compared, as without the cache (verify once per
  * load); a store by SPU code into a verified span is not tracked, the same as
- * there. Misses (NULL) are not cached, so a rejected or unlifted target is
- * resolved every time, as before. SPU_DISPATCH_CACHE=shadow runs the full
+ * there. SPU_DISPATCH_CACHE_MISSES=1 also caches NULL answers using the same
+ * ownership and registry generations. SPU_DISPATCH_CACHE=shadow runs the full
  * resolver on every hit, counts disagreements and returns its answer. */
 typedef struct {
     spu_lifted_fn fn;
@@ -1782,6 +1782,7 @@ typedef struct {
 } spu_dcache_ent;
 #define SPU_DCACHE_ENTRIES 512u
 static SPU_TLS spu_dcache_ent t_dcache[SPU_DCACHE_ENTRIES];
+static SPU_TLS int t_dcache_cache_misses = -1;
 static uint32_t s_dcache_next_id;
 static unsigned long long s_dcache_hits, s_dcache_misses, s_dcache_shadow_bad;
 static int spu_dcache_mode(void)   /* 0 off, 1 on, 2 shadow */
@@ -1820,7 +1821,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
      * a count newer than the registry it saw. */
     const uint32_t rgen = __atomic_load_n(&s_registry_count, __ATOMIC_ACQUIRE);
     spu_dcache_ent* e = &t_dcache[((lsa >> 2) ^ (id * 0x9E3779B1u)) & (SPU_DCACHE_ENTRIES - 1)];
-    if (e->fn && e->id == id && e->lsa == lsa && e->rgen == rgen &&
+    if (e->id == id && e->lsa == lsa && e->rgen == rgen &&
         e->residency == c->dcache_residency && e->image == c->image_id &&
         e->ovl == c->resident_ovl && e->task == c->resident_task) {
         if (mode == 2) {
@@ -1831,7 +1832,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
                     fprintf(stderr, "[spu-dcache] shadow mismatch img=%d ovl=%d task=%d lsa=0x%05X "
                             "cached=%p full=%p\n", c->image_id, c->resident_ovl, c->resident_task,
                             lsa, (void*)e->fn, (void*)full);
-                e->fn = NULL;
+                e->id = 0;  /* invalidate both positive and negative answers */
                 return full;
             }
             spu_dcache_shadow_stats();
@@ -1843,7 +1844,11 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
         spu_dcache_shadow_stats();
     }
     const spu_lifted_fn fn = spu_lifted_lookup_full(ctx, lsa);
-    if (fn) {
+    if(t_dcache_cache_misses<0) {
+        const char* setting=getenv("SPU_DISPATCH_CACHE_MISSES");
+        t_dcache_cache_misses=setting && !strcmp(setting,"1");
+    }
+    if (fn || t_dcache_cache_misses) {
         /* The resolver may have verified a pending slot; the entry records the
          * residency it resolved against, read after it. */
         e->fn = fn; e->id = id; e->lsa = lsa; e->rgen = rgen;
