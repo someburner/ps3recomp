@@ -154,6 +154,32 @@ int main(void)
         check("mul_expr", hlsl, "(r[0]).xyzw) * ((r[0]).xyzw)");
     }
 
+    /* Derivatives must write their result instead of silently leaving a
+     * zero register. Exercise both axes, export files and compiler modes;
+     * partial masks and source swizzles still follow the common emitter. */
+    for (u32 axis = 0; axis < 2; ++axis) {
+        u8 prog[16] = {0};
+        put_word(prog, OPC(0x15u + axis) | (3u << 9) | INSRC(4) | END |
+                       (axis ? OUTHALF : 0));
+        put_word(prog + 4, T_INPUT | EXEC_ALWAYS |
+                          (1u << 9) | (0u << 11) | (3u << 13) | (2u << 15));
+        for (u32 buffered = 0; buffered < 2; ++buffered) {
+            u32 nk = 99;
+            int n = buffered
+                ? rsx_fp_decompile_buffered_ex(prog, sizeof prog,
+                    axis ? CTRL_16BIT : CTRL_32BIT, 0, hlsl, sizeof hlsl, &nk)
+                : rsx_fp_decompile(prog, sizeof prog,
+                    axis ? CTRL_16BIT : CTRL_32BIT, hlsl, sizeof hlsl);
+            check_true("derivative_decoded", n == 1);
+            check("derivative_axis_swizzle", hlsl,
+                  axis ? "ddy((input.tc0).yxwz)" : "ddx((input.tc0).yxwz)");
+            check("derivative_mask_register", hlsl,
+                  axis ? "h[0].xy = _v.xy" : "r[0].xy = _v.xy");
+            check_absent("derivative_implemented", hlsl, "unhandled FP opcode");
+            if (buffered) check_true("derivative_no_constants", nk == 0);
+        }
+    }
+
     /* Test 3: MAD r0, r0, CONST, r0 with inline constant + saturate. */
     {
         u8 prog[32];
