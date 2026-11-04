@@ -14,6 +14,7 @@ static void check(unsigned w, unsigned h)
     for (unsigned i=0; i<n; ++i) {
         rng = rng*1664525u+1013904223u;
         values[i] = (float)(rng>>8)/16777216.0f;
+        if(i&1u) { unsigned bits=rng%0x3f800001u; memcpy(&values[i],&bits,4); }
     }
     const float edges[] = {0,1,0.5f,0x1p-149f,0x1.fffffep-1f,0x1p-25f,
                           0x1p-24f,0x1p-17f,0x1p-16f};
@@ -33,21 +34,33 @@ static void check(unsigned w, unsigned h)
     vk_destroy_buffer(&upload);
     assert(!vk_eng_depth_as_color(NULL,z,w+1,h,RSX_TEX_FMT_A8R8G8B8));
     assert(!vk_eng_depth_as_color(NULL,z,w,h,0));
+    unsigned other = vk_eng_depth_target_create(NULL,w,h); /* cleared to 1 */
+    assert(other);
     /* Queue both conversions together to catch reuse/order bugs in batching. */
     for (unsigned repeat=0; repeat<3; ++repeat) {
-        unsigned handles[2] = {
+        unsigned handles[3] = {
             vk_eng_depth_as_color(NULL,z,w,h,RSX_TEX_FMT_A8R8G8B8),
+            vk_eng_depth_as_color(NULL,other,w,h,RSX_TEX_FMT_A8R8G8B8),
             vk_eng_depth_as_color(NULL,z,w,h,RSX_TEX_FMT_DEPTH16)
         };
-        for (unsigned mode=0; mode<2; ++mode) {
+        unsigned view=vk_eng_surface_view(NULL,handles[0],0,RSX_TEX_FMT_A8R8G8B8);
+        assert(view);
+        int pending=s_eb_pending!=0;
+        vk_eng_release(NULL,view);
+        if(pending && getenv("PS3RECOMP_VK_DEFER_VIEWS") && !strcmp(getenv("PS3RECOMP_VK_DEFER_VIEWS"),"1"))
+            assert(s_retired_view_count && s_eb_pending);
+        if(getenv("PS3RECOMP_VK_DEPTH_DIRECT") && !strcmp(getenv("PS3RECOMP_VK_DEPTH_DIRECT"),"1"))
+            assert(s_dd.pipeline && (s_eobj[handles[0]].im.usage & VK_IMAGE_USAGE_STORAGE_BIT));
+        for (unsigned mode=0; mode<3; ++mode) {
             assert(handles[mode]);
-            unsigned bpp=mode?2:4, scale=mode?65535:16777215;
+            unsigned bpp=mode==2?2:4, scale=mode==2?65535:16777215;
             memset(got,0xcc,n*4);
             vk_eng_readback(NULL,handles[mode],0,0,w,h,got,w*bpp);
+            assert(!s_retired_view_count);
             for (unsigned i=0; i<n; ++i) {
-                unsigned v=(unsigned)((double)values[i]*scale+0.5);
+                unsigned v=(unsigned)((mode==1?1.0:(double)values[i])*scale+0.5);
                 unsigned char want[4];
-                if(mode) { want[0]=v; want[1]=v>>8; }
+                if(mode==2) { want[0]=v; want[1]=v>>8; }
                 else { want[0]=v>>8; want[1]=v; want[2]=0; want[3]=v>>16; }
                 if(memcmp(got+i*bpp,want,bpp)) {
                     fprintf(stderr,"FAIL %ux%u mode=%u i=%u depth=%.9g got=%02x,%02x expected=%02x,%02x\n",
@@ -60,6 +73,7 @@ static void check(unsigned w, unsigned h)
         }
     }
     vk_eng_release(NULL,z);
+    vk_eng_release(NULL,other);
     free(values); free(got);
 }
 int main(void)

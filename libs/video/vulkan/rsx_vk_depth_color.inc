@@ -77,6 +77,10 @@ static u32 vk_eng_depth_as_color(void* user, u32 depth, u32 w, u32 h, u32 rsx_fm
     if (!bits || !z || !w || !h || w > z->w || h > z->h ||
         (s_vk.depth_format != VK_FORMAT_D32_SFLOAT &&
          s_vk.depth_format != VK_FORMAT_D32_SFLOAT_S8_UINT)) return 0;
+    if (bits == 24) {
+        u32 direct=vk_eng_depth_direct(user,depth,w,h);
+        if (direct) return direct;
+    }
     if (vk_depth_color_init()) return 0;
     const u64 count64 = (u64)w * h;
     VkPhysicalDeviceProperties props;
@@ -114,7 +118,10 @@ static u32 vk_eng_depth_as_color(void* user, u32 depth, u32 w, u32 h, u32 rsx_fm
     }
     o->kind = VK_ENG_COLOR; o->snapshot = 1;
     o->fmt = fmt; o->bpp = bits == 24 ? 4u : 2u; o->w = w; o->h = h;
-    const int batch = vk_eb_active();
+    /* Diagnostic only: isolate conversion timestamps from the draw batch. */
+    static int split = -1;
+    if (split < 0) { const char* e=getenv("PS3RECOMP_VK_DEPTH_SPLIT"); split=e && !strcmp(e,"1"); }
+    const int batch = vk_eb_active() && !split;
     if (!(batch && s_eb_pending) && vk_begin()) { vk_eng_release(user, hd); return 0; }
     vk_cmd_after_everything(s_vk.cmd); /* previous reads of the reusable buffer/image */
     vk_barrier_image(z->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
