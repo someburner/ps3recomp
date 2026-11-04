@@ -16,6 +16,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__SSSE3__)
+#include <tmmintrin.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -628,6 +631,9 @@ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
     const uint8_t* p = &ctx->ls[lsa];
 #if defined(__ARM_NEON)
     vst1q_u8(v._u8, vrev32q_u8(vld1q_u8(p)));     /* ldr q; rev32 */
+#elif SPU_LS_FAST && defined(__SSSE3__) && !defined(SPU_SCALAR_HELPERS)
+    const __m128i reverse_words = _mm_setr_epi8(3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12);
+    _mm_storeu_si128((__m128i*)v._u8, _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)p), reverse_words));
 #elif SPU_LS_FAST
     uint32_t w0, w1, w2, w3;
     memcpy(&w0, p,      4); memcpy(&w1, p + 4,  4);
@@ -725,6 +731,9 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
     uint8_t* p = &ctx->ls[lsa];
 #if defined(__ARM_NEON)
     vst1q_u8(p, vrev32q_u8(vld1q_u8(val._u8)));   /* rev32; str q */
+#elif SPU_LS_FAST && defined(__SSSE3__) && !defined(SPU_SCALAR_HELPERS)
+    const __m128i reverse_words = _mm_setr_epi8(3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12);
+    _mm_storeu_si128((__m128i*)p, _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)val._u8), reverse_words));
 #elif SPU_LS_FAST
     uint32_t w0 = SPU_BSWAP32(val._u32[0]), w1 = SPU_BSWAP32(val._u32[1]);
     uint32_t w2 = SPU_BSWAP32(val._u32[2]), w3 = SPU_BSWAP32(val._u32[3]);

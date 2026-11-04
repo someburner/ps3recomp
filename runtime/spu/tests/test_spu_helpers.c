@@ -505,8 +505,38 @@ static void test_ls_quadwords(void) {
     else { g_fail++; fprintf(stderr, "FAIL: %s\n", g_current); }
 }
 
+static void test_ls_quadword_matrix(void) {
+    static spu_context ctx;
+    static uint8_t storage[SPU_LS_SIZE+64];
+    uint32_t rng=0x85E4A72Bu;
+    int bad=0;
+    TEST("LS quadwords: every host alignment, wrapping, byte order and adjacent guards");
+    for(unsigned pad=0;pad<16;pad++) {
+        ctx.ls=storage+16+pad;
+        for(unsigned j=0;j<sizeof storage;j++) storage[j]=(uint8_t)(j*73+39);
+        for(unsigned iteration=0;iteration<4096;iteration++) {
+            rng=rng*1664525u+1013904223u;
+            const uint32_t address=rng | 0xFFFC0000u;
+            uint8_t* bytes=ctx.ls+(address & 0x3FFF0u);
+            u128 read=spu_ls_read128(&ctx,address), value;
+            for(unsigned lane=0;lane<4;lane++) {
+                const uint8_t* p=bytes+lane*4;
+                uint32_t expected=((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];
+                bad+=read._u32[lane]!=expected;
+                rng=rng*1664525u+1013904223u; value._u32[lane]=rng;
+            }
+            uint8_t before=bytes[-1], after=bytes[16];
+            spu_ls_write128(&ctx,address,value);
+            for(unsigned j=0;j<16;j++) bad+=bytes[j]!=(uint8_t)(value._u32[j/4]>>(24-8*(j%4)));
+            bad+=bytes[-1]!=before || bytes[16]!=after;
+        }
+    }
+    if(!bad) g_pass++; else { g_fail++; fprintf(stderr,"FAIL: %s (%d mismatches)\n",g_current,bad); }
+}
+
 int main(void) {
     test_ls_quadwords();
+    test_ls_quadword_matrix();
     test_immediate_loaders();
     test_simd_arith();
     test_multiply();
